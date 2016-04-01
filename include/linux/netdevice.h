@@ -38,6 +38,7 @@
 #include <asm/cache.h>
 #include <asm/byteorder.h>
 
+
 #include <linux/device.h>
 #include <linux/percpu.h>
 #include <linux/rculist.h>
@@ -54,6 +55,18 @@
 #include <net/netprio_cgroup.h>
 
 #include <linux/netdev_features.h>
+
+#include <linux/kernel.h>
+
+//#define NEW
+
+extern wait_queue_head_t net_recv_wq;
+extern char* pkt_stamp[8000];
+extern int pkt_index;
+
+extern int net_batch_size;
+extern int cleaned;
+
 
 struct netpoll_info;
 struct phy_device;
@@ -414,6 +427,7 @@ enum rx_handler_result {
 };
 typedef enum rx_handler_result rx_handler_result_t;
 typedef rx_handler_result_t rx_handler_func_t(struct sk_buff **pskb);
+
 
 extern void __napi_schedule(struct napi_struct *n);
 
@@ -1003,6 +1017,16 @@ struct net_device_ops {
 	void			(*ndo_neigh_destroy)(struct neighbour *n);
 };
 
+/*RTCA*/
+extern int process_net_recv(int i,int quota);
+extern void vif_bridge(struct sk_buff * skb);
+extern void net_recv_schedule();
+
+extern wait_queue_head_t* netbk_wq[6];
+extern wait_queue_head_t* netbk_tx_wq[6];
+extern int tx_ring_unused();
+
+
 /*
  *	The DEVICE structure.
  *	Actually, this whole structure is a big mistake.  It mixes I/O
@@ -1021,6 +1045,13 @@ struct net_device {
 	 * of the interface.
 	 */
 	char			name[IFNAMSIZ];
+
+/*RTCA*/	
+//#ifdef NEW
+	int priority;
+	int domid;
+	int tx_flag[6];
+//#endif
 
 	struct pm_qos_request	pm_qos_req;
 
@@ -1299,6 +1330,12 @@ struct net_device {
 	/* group the device belongs to */
 	int group;
 };
+
+/*RTCA*/
+extern struct net_device* NIC_dev;
+extern int BQL_flag;
+extern int DQL_flag;
+
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 
 #define	NETDEV_ALIGN		32
@@ -1712,6 +1749,17 @@ static inline int unregister_gifconf(unsigned int family)
 	return register_gifconf(family, NULL);
 }
 
+/*RTCA*/
+/*struct time_record{
+	char desc[20];
+	unsigned long long time;
+}
+
+extern struct time_record time[2000];
+extern int time_index;*/
+
+extern int in_tx_action;
+
 /*
  * Incoming packets are placed on per-cpu queues
  */
@@ -1741,6 +1789,17 @@ struct softnet_data {
 	unsigned		dropped;
 	struct sk_buff_head	input_pkt_queue;
 	struct napi_struct	backlog;
+	
+/*RTCA*/
+//#ifdef NEW
+	    int input_pkt_nr;  
+	    struct sk_buff_head priority_queue[6];
+	    u8 localdoms[20][ETH_ALEN];
+	    struct net_device *dev_queue[6];
+	    int dom_index;
+	    
+//#endif
+
 };
 
 static inline void input_queue_head_incr(struct softnet_data *sd)
@@ -1779,6 +1838,21 @@ static inline void netif_tx_schedule_all(struct net_device *dev)
 static inline void netif_tx_start_queue(struct netdev_queue *dev_queue)
 {
 	clear_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state);
+	if(net_batch_size ==17){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]start_drv, %d", time1.tv_sec*1000000+time1.tv_usec, current->pid);
+			pkt_index++;	 
+	}
+	if(DQL_flag==0){
+		//DQL_flag=1;
+		if(net_batch_size ==17){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]start_on, %d, %d", time1.tv_sec*1000000+time1.tv_usec, BQL_flag, current->pid);
+			pkt_index++;	 
+		}
+	}
 }
 
 /**
@@ -1810,8 +1884,33 @@ static inline void netif_tx_wake_queue(struct netdev_queue *dev_queue)
 		return;
 	}
 #endif
-	if (test_and_clear_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state))
+	if(net_batch_size ==27){
+				struct timeval time1;
+				do_gettimeofday(&time1);
+				sprintf(pkt_stamp[pkt_index],"[%ld]wake, %d, %d", time1.tv_sec*1000000+time1.tv_usec, BQL_flag, current->pid);
+				pkt_index++;	 
+		}
+
+	/*if(DQL_flag==0 && cleaned==1){
+		DQL_flag=1;
+		if(net_batch_size ==28){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]2on, %d, %d", time1.tv_sec*1000000+time1.tv_usec, BQL_flag, current->pid);
+			pkt_index++;	 
+		}
+	}*/
+	if (test_and_clear_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state)){
 		__netif_schedule(dev_queue->qdisc);
+		if(net_batch_size ==27){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]netif2on", time1.tv_sec*1000000+time1.tv_usec);
+			pkt_index++;	 
+		}
+		
+	}
+		
 }
 
 /**
@@ -1843,6 +1942,14 @@ static inline void netif_tx_stop_queue(struct netdev_queue *dev_queue)
 		return;
 	}
 	set_bit(__QUEUE_STATE_DRV_XOFF, &dev_queue->state);
+	//DQL_flag=0;
+	//cleaned=0;
+	if(net_batch_size ==28){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]2off, %d, %d", time1.tv_sec*1000000+time1.tv_usec, BQL_flag, current->pid);
+			pkt_index++;	 
+		}
 }
 
 /**
@@ -1903,6 +2010,13 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 		return;
 
 	set_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state);
+	BQL_flag=0;
+	if(net_batch_size ==38){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]1off", time1.tv_sec*1000000+time1.tv_usec);
+			pkt_index++;	 
+		}
 
 	/*
 	 * The XOFF flag must be set before checking the dql_avail below,
@@ -1912,14 +2026,31 @@ static inline void netdev_tx_sent_queue(struct netdev_queue *dev_queue,
 	smp_mb();
 
 	/* check again in case another CPU has just made room avail */
-	if (unlikely(dql_avail(&dev_queue->dql) >= 0))
+	if (unlikely(dql_avail(&dev_queue->dql) >= 0)){
 		clear_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state);
+		BQL_flag=1;
+		if(net_batch_size ==38){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]1on", time1.tv_sec*1000000+time1.tv_usec);
+			pkt_index++;	 
+		}
+
+	}
 #endif
 }
 
 static inline void netdev_sent_queue(struct net_device *dev, unsigned int bytes)
 {
 	netdev_tx_sent_queue(netdev_get_tx_queue(dev, 0), bytes);
+	if(net_batch_size==40 ||pkt_index>7000){
+		int pkt_i;
+		for(pkt_i=0; pkt_i<pkt_index; pkt_i++){
+			printk("%s\n", pkt_stamp[pkt_i]);
+		}
+		printk("\n\n\n\n\n\n\n\n\n\n\n\n\n");
+		pkt_index=0;
+	}
 }
 
 static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
@@ -1928,7 +2059,6 @@ static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
 #ifdef CONFIG_BQL
 	if (unlikely(!bytes))
 		return;
-
 	dql_completed(&dev_queue->dql, bytes);
 
 	/*
@@ -1940,9 +2070,22 @@ static inline void netdev_tx_completed_queue(struct netdev_queue *dev_queue,
 
 	if (dql_avail(&dev_queue->dql) < 0)
 		return;
-
-	if (test_and_clear_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state))
+	
+	if (BQL_flag==0){
+		BQL_flag=1;
+		if(net_batch_size ==38){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]1on", time1.tv_sec*1000000+time1.tv_usec);
+			pkt_index++;	 
+		}
+	}
+	if (test_and_clear_bit(__QUEUE_STATE_STACK_XOFF, &dev_queue->state)){
+		
 		netif_schedule_queue(dev_queue);
+		
+	}
+		
 #endif
 }
 
@@ -2111,6 +2254,11 @@ extern void dev_kfree_skb_irq(struct sk_buff *skb);
  * either disabled or enabled.
  */
 extern void dev_kfree_skb_any(struct sk_buff *skb);
+
+//#ifdef NEW
+extern int		vif_rx(struct sk_buff *skb);
+extern int		vif_rx_ni(struct sk_buff *skb);
+//#endif
 
 extern int		netif_rx(struct sk_buff *skb);
 extern int		netif_rx_ni(struct sk_buff *skb);
@@ -2578,6 +2726,8 @@ extern struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev,
 extern int		netdev_max_backlog;
 extern int		netdev_tstamp_prequeue;
 extern int		weight_p;
+/*RTCA*/
+extern int          net_batch_size; //default 64
 extern int		bpf_jit_enable;
 extern int		netdev_set_master(struct net_device *dev, struct net_device *master);
 extern int netdev_set_bond_master(struct net_device *dev,

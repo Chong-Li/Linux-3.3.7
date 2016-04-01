@@ -121,6 +121,15 @@ static struct ctl_table net_core_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
 	},
+
+/*RTCA*/
+	{
+		.procname="net_batch_size",
+		.data =&net_batch_size,
+		.maxlen=sizeof(int),
+		.mode=0644,
+		.proc_handler=proc_dointvec
+	},
 	{
 		.procname	= "netdev_max_backlog",
 		.data		= &netdev_max_backlog,

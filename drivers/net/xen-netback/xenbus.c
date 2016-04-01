@@ -20,6 +20,7 @@
 */
 
 #include "common.h"
+#define NEW_XENBUS
 
 struct backend_info {
 	struct xenbus_device *dev;
@@ -75,13 +76,43 @@ static int netback_probe(struct xenbus_device *dev,
 
 	sg = 1;
 
+/*RTCA*/	
+#ifdef NEW_XENBUS
+	struct softnet_data *sd;
+	sd=&__get_cpu_var(softnet_data);
+
+	printk("This device's nodename==%s\n",dev->nodename);
+	printk("This device's otherend==%s\n",dev->otherend);	
+	printk("Put in localdoms[%d]\n",sd->dom_index);
+	u8 temp[17];
+#endif
+
 	do {
 		err = xenbus_transaction_start(&xbt);
 		if (err) {
 			xenbus_dev_fatal(dev, err, "starting transaction");
 			goto fail;
 		}
-
+		
+#ifdef NEW_XENBUS	
+		if(sd->dom_index>=5)
+			goto next;
+		memcpy(temp,(u8*)xenbus_read(xbt,dev->nodename,"mac",NULL),17);
+		//printk("MAC is %s\n",temp);
+		int i,j;
+		unsigned long flags;	
+		local_irq_save(flags);
+		memset(&(sd->localdoms[sd->dom_index][0]),0,ETH_ALEN);
+		for(i=0,j=0;j<ETH_ALEN;i++,j++){
+			(sd->localdoms[sd->dom_index][j])|=(temp[i]>='A')?(10+temp[i++]-'A'):(temp[i++]-'0');
+			(sd->localdoms[sd->dom_index][j])*=16;
+			(sd->localdoms[sd->dom_index][j])|=(temp[i]>='A')?(10+temp[i++]-'A'):(temp[i++]-'0');
+		}
+		//printk("The new mac is %x%x%x%x%x%x\n",localdoms[dom_index][0],localdoms[dom_index][1],localdoms[dom_index][2],localdoms[dom_index][3],localdoms[dom_index][4],localdoms[dom_index][5]);
+		sd->dom_index++;
+		local_irq_restore(flags);
+#endif
+next:
 		err = xenbus_printf(xbt, dev->nodename, "feature-sg", "%d", sg);
 		if (err) {
 			message = "writing feature-sg";

@@ -70,7 +70,9 @@ MODULE_PARM_DESC(copybreak,
  * Valid Range: 0-65535
  */
 E1000_PARAM(TxIntDelay, "Transmit Interrupt Delay");
-#define DEFAULT_TIDV 8
+//#define DEFAULT_TIDV 8
+#define DEFAULT_TIDV 0
+
 #define MAX_TXDELAY 0xFFFF
 #define MIN_TXDELAY 0
 
@@ -80,7 +82,9 @@ E1000_PARAM(TxIntDelay, "Transmit Interrupt Delay");
  * Valid Range: 0-65535
  */
 E1000_PARAM(TxAbsIntDelay, "Transmit Absolute Interrupt Delay");
-#define DEFAULT_TADV 32
+//#define DEFAULT_TADV 32
+#define DEFAULT_TADV 0
+
 #define MAX_TXABSDELAY 0xFFFF
 #define MIN_TXABSDELAY 0
 
@@ -91,6 +95,7 @@ E1000_PARAM(TxAbsIntDelay, "Transmit Absolute Interrupt Delay");
  * Valid Range: 0-65535
  */
 E1000_PARAM(RxIntDelay, "Receive Interrupt Delay");
+//#define DEFAULT_RIDV 1
 #define MAX_RXDELAY 0xFFFF
 #define MIN_RXDELAY 0
 
@@ -100,6 +105,7 @@ E1000_PARAM(RxIntDelay, "Receive Interrupt Delay");
  * Valid Range: 0-65535
  */
 E1000_PARAM(RxAbsIntDelay, "Receive Absolute Interrupt Delay");
+//#define DEFAULT_RADV 1
 #define MAX_RXABSDELAY 0xFFFF
 #define MIN_RXABSDELAY 0
 
@@ -109,7 +115,8 @@ E1000_PARAM(RxAbsIntDelay, "Receive Absolute Interrupt Delay");
  * Valid Range: 100-100000 (0=off, 1=dynamic, 3=dynamic conservative)
  */
 E1000_PARAM(InterruptThrottleRate, "Interrupt Throttling Rate");
-#define DEFAULT_ITR 3
+/*3 originally*/
+#define DEFAULT_ITR 50000
 #define MAX_ITR 100000
 #define MIN_ITR 100
 
@@ -120,7 +127,7 @@ E1000_PARAM(InterruptThrottleRate, "Interrupt Throttling Rate");
  * Default Value: 2 (MSI-X)
  */
 E1000_PARAM(IntMode, "Interrupt Mode");
-#define MAX_INTMODE	2
+#define MAX_INTMODE	0
 #define MIN_INTMODE	0
 
 /*
@@ -238,6 +245,7 @@ static int __devinit e1000_validate_option(unsigned int *value,
  **/
 void __devinit e1000e_check_options(struct e1000_adapter *adapter)
 {
+	printk("\n\n\n~~~~~~~~~check_option~~~~~~~~~~\n\n\n");
 	struct e1000_hw *hw = &adapter->hw;
 	int bd = adapter->bd_number;
 
@@ -335,9 +343,11 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
 
 		if (num_InterruptThrottleRate > bd) {
 			adapter->itr = InterruptThrottleRate[bd];
+			//adapter->itr=0;
 			switch (adapter->itr) {
 			case 0:
 				e_info("%s turned off\n", opt.name);
+				//printk("~~~~~~1~~~~~~~\n");
 				break;
 			case 1:
 				e_info("%s set to dynamic mode\n", opt.name);
@@ -380,6 +390,7 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
 				break;
 			}
 		} else {
+			//printk("~~~~~~~2~~~~~~\n");
 			adapter->itr_setting = opt.def;
 			adapter->itr = 20000;
 		}
@@ -395,10 +406,13 @@ void __devinit e1000e_check_options(struct e1000_adapter *adapter)
 		};
 
 		if (num_IntMode > bd) {
+			//printk("~~~~~~3~~~~~~\n");
 			unsigned int int_mode = IntMode[bd];
+			//int_mode=0;
 			e1000_validate_option(&int_mode, &opt, adapter);
 			adapter->int_mode = int_mode;
 		} else {
+			//printk("~~~~~~4~~~~~~\n");
 			adapter->int_mode = opt.def;
 		}
 	}

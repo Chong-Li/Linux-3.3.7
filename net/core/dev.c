@@ -136,8 +136,51 @@
 #include <linux/net_tstamp.h>
 #include <linux/jump_label.h>
 #include <net/flow_keys.h>
+#include <linux/kthread.h>
+#include <linux/sched.h>
+
 
 #include "net-sysfs.h"
+
+#define NEW
+
+
+struct net_device *NIC_dev;
+EXPORT_SYMBOL(NIC_dev);
+
+int BQL_flag;
+EXPORT_SYMBOL(BQL_flag);
+int DQL_flag;
+EXPORT_SYMBOL(DQL_flag);
+char* pkt_stamp[8000];
+EXPORT_SYMBOL_GPL(pkt_stamp);
+
+int pkt_index;
+EXPORT_SYMBOL_GPL(pkt_index);
+
+int cleaned;
+EXPORT_SYMBOL_GPL(cleaned);
+
+
+
+
+/*RTCA*/
+#define PACKET_SKIPBRIDGE		7      /* this kind of packets can skip the bridge*/
+
+struct sk_buff_head tmp_queue[6];
+int input_qlen;
+int in_tx_action;
+int lock_flag;
+int in_action;
+
+wait_queue_head_t* netbk_wq[6];
+EXPORT_SYMBOL(netbk_wq);
+
+wait_queue_head_t* netbk_tx_wq[6];
+EXPORT_SYMBOL(netbk_tx_wq);
+
+
+
 
 /* Instead of increasing this, you should create a hash table. */
 #define MAX_GRO_SKBS 8
@@ -2210,14 +2253,32 @@ static inline int skb_needs_linearize(struct sk_buff *skb,
 				!(features & NETIF_F_SG)));
 }
 
+
+
 int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 			struct netdev_queue *txq)
 {
+	//printk("%s\n",__func__);
+	int vif_index=20;
+	if(!memcmp(&(skb->cb[40]),"vif",3)){
+		vif_index=skb->cb[43]-'0';		
+	}
 	const struct net_device_ops *ops = dev->netdev_ops;
 	int rc = NETDEV_TX_OK;
 	unsigned int skb_len;
 
+	if(net_batch_size==108)
+		printk("\n\n in hard start xmit\n");
+	//printk("%s, %d\n", __func__,skb_num);
+	
 	if (likely(!skb->next)) {
+		
+		if(net_batch_size==108){
+			printk("no next      len=%d, data_len=%d\n", skb->len, skb->data_len);
+			int i;
+			for (i = (int)skb_shinfo(skb)->nr_frags - 1; i >= 0; i--)
+				printk(" frag[%d]=%u , ", i, skb_frag_size(&skb_shinfo(skb)->frags[i]));
+		}
 		netdev_features_t features;
 
 		/*
@@ -2244,14 +2305,16 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 		}
 
 		if (netif_needs_gso(skb, features)) {
-			if (unlikely(dev_gso_segment(skb, features)))
+			if (unlikely(dev_gso_segment(skb, features))){
 				goto out_kfree_skb;
+			}
 			if (skb->next)
 				goto gso;
 		} else {
 			if (skb_needs_linearize(skb, features) &&
-			    __skb_linearize(skb))
+			    __skb_linearize(skb)){
 				goto out_kfree_skb;
+			}
 
 			/* If packet is not checksummed and device does not
 			 * support checksumming for this protocol, complete
@@ -2261,25 +2324,40 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 				skb_set_transport_header(skb,
 					skb_checksum_start_offset(skb));
 				if (!(features & NETIF_F_ALL_CSUM) &&
-				     skb_checksum_help(skb))
+				     skb_checksum_help(skb)){
 					goto out_kfree_skb;
+				}
 			}
 		}
 
 		skb_len = skb->len;
+
+		//rcu_read_lock();
 		rc = ops->ndo_start_xmit(skb, dev);
+		//rcu_read_unlock();
+next:		
 		trace_net_dev_xmit(skb, rc, dev, skb_len);
 		if (rc == NETDEV_TX_OK)
 			txq_trans_update(txq);
+		//if((BQL_flag==0 ||DQL_flag==0)){
+			//return 110;
+		//}
 		return rc;
 	}
 
 gso:
 	do {
 		struct sk_buff *nskb = skb->next;
+		memcpy(&(nskb->cb[40]), &(skb->cb[40]),4); 
 
 		skb->next = nskb->next;
 		nskb->next = NULL;
+		if(net_batch_size==108){
+			printk("\n next  len=%d, data_len=%d\n", nskb->len, nskb->data_len);
+			int i;
+			for (i = (int)skb_shinfo(nskb)->nr_frags - 1; i >= 0; i--)
+				printk(" frag[%d]=%u , ", i, skb_frag_size(&skb_shinfo(nskb)->frags[i]));
+		}
 
 		/*
 		 * If device doesn't need nskb->dst, release it right now while
@@ -2289,28 +2367,47 @@ gso:
 			skb_dst_drop(nskb);
 
 		skb_len = nskb->len;
+		//printk("gso\n");
+		//rcu_read_lock();
 		rc = ops->ndo_start_xmit(nskb, dev);
+		//rcu_read_unlock();
+
 		trace_net_dev_xmit(nskb, rc, dev, skb_len);
+gso_next:
 		if (unlikely(rc != NETDEV_TX_OK)) {
-			if (rc & ~NETDEV_TX_MASK)
+			if (rc & ~NETDEV_TX_MASK){
+
 				goto out_kfree_gso_skb;
+			}
 			nskb->next = skb->next;
 			skb->next = nskb;
-			return rc;
+			//return rc;
+			if((BQL_flag==0 ||DQL_flag==0)&&skb->next){
+				return 110;
+			}
 		}
 		txq_trans_update(txq);
-		if (unlikely(netif_xmit_stopped(txq) && skb->next))
-			return NETDEV_TX_BUSY;
+		//if (unlikely(netif_xmit_stopped(txq) && skb->next)){
+			//return NETDEV_TX_BUSY;
+
+		//}
+		if((BQL_flag==0 ||DQL_flag==0)&&skb->next){
+			return 110;
+		}
 	} while (skb->next);
 
 out_kfree_gso_skb:
+
 	if (likely(skb->next == NULL))
 		skb->destructor = DEV_GSO_CB(skb)->destructor;
 out_kfree_skb:
+
 	kfree_skb(skb);
 out:
 	return rc;
 }
+EXPORT_SYMBOL(dev_hard_start_xmit);
+
 
 static u32 hashrnd __read_mostly;
 
@@ -2431,7 +2528,7 @@ static struct netdev_queue *dev_pick_tx(struct net_device *dev,
 			}
 		}
 	}
-
+	//printk("select queue %d\n",queue_index);
 	skb_set_queue_mapping(skb, queue_index);
 	return netdev_get_tx_queue(dev, queue_index);
 }
@@ -2514,6 +2611,8 @@ static void skb_update_prio(struct sk_buff *skb)
 static DEFINE_PER_CPU(int, xmit_recursion);
 #define RECURSION_LIMIT 10
 
+
+
 /**
  *	dev_queue_xmit - transmit a buffer
  *	@skb: buffer to transmit
@@ -2546,24 +2645,144 @@ int dev_queue_xmit(struct sk_buff *skb)
 	struct Qdisc *q;
 	int rc = -ENOMEM;
 
-	/* Disable soft irqs for various locks below. Also
-	 * stops preemption for RCU.
-	 */
-	rcu_read_lock_bh();
-
 	skb_update_prio(skb);
-
+	
 	txq = dev_pick_tx(dev, skb);
-	q = rcu_dereference_bh(txq->qdisc);
 
-#ifdef CONFIG_NET_CLS_ACT
-	skb->tc_verd = SET_TC_AT(skb->tc_verd, AT_EGRESS);
+	//if(skb->dev->domid==1)
+		//printk("pkt1 recv\n");
+	//struct ethhdr *eth_header=(struct ethhdr *)skb_mac_header(skb);
+	//struct iphdr *ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->dest==htons(8000)){
+	//if(!memcmp(&(skb->cb[40]),"vif0",4)&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+	//if(!memcmp(&(skb->cb[40]),"vif0",4)){
+		//printk("t\n");
+	//}
+	int vif_index=20;
+	if(!memcmp(&(skb->cb[40]),"vif",3)){
+		vif_index=skb->cb[43]-'0';
+	}
+
+	//printk("%s, %d\n", __func__,skb_num);
+
+#ifdef NEW
+	/*RTCA, packets coming from NIC, or goto guest domains*/
+	/*if(skb->dev->domid!=0  ){
+		//rcu_read_lock_bh();
+		//if(skb->pkt_type==PACKET_SKIPBRIDGE&&skb->dev->domid==1)
+			//printk("recv\n");
+		goto normal;
+	}
+	else if(vif_index<20){
+		//if(vif_index==0)
+			//printk("start_xmit\n");
+		//goto normal;	
+		rcu_read_lock_bh();
+		rc=dev_hard_start_xmit(skb,dev,txq);
+		rcu_read_unlock_bh();
+		return rc;
+	}*/
+	//rcu_read_lock();
+	rcu_read_lock_bh();
+	qdisc_skb_cb(skb)->pkt_len = skb->len;
+	rc=dev_hard_start_xmit(skb,dev,txq);
+	rcu_read_unlock_bh();
+	//rcu_read_unlock();
+	return rc;
+
+
+	/*RTCA, packets come from guest domains and goto NIC*/
+	/*if(!memcmp(&(skb->cb[40]),"vif",3)){
+		
+		int vif_index=skb->cb[43]-'0';
+		int batch=0; int index=5;
+		//if(tmp_queue[vif_index].qlen==0){
+		if(0){
+			batch=0; index=5;
+			for(; index>=vif_index;index--)
+				batch=dev->tx_flag[index]+batch;		
+			if(batch>=(40*(6-vif_index))){
+				__skb_queue_tail(&tmp_queue[vif_index], skb);
+				rc=NETDEV_TX_OK;
+				goto out;
+			}
+			rc = dev_hard_start_xmit(skb, dev, txq);
+			goto out;
+		}
+		
+		else{
+			//if(tmp_queue[vif_index].qlen>=40*(6-vif_index)){
+			if(tmp_queue[vif_index].qlen>=256){
+				kfree_skb(skb);
+			}
+			else
+				__skb_queue_tail(&tmp_queue[vif_index],skb);
+			//if(lock_flag)
+				//return NETDEV_TX_OK;
+			
+			rcu_read_lock_bh();
+			//lock_flag=1;
+			int i=0;
+			while(1){
+				for(i=0;i<=vif_index;i++){
+					if(tmp_queue[i].qlen>0)
+						break;
+				}
+				if(i>vif_index)
+					break;	
+				if(i<vif_index)
+					break;
+				 batch=0; index=5;
+				for(; index>=0;index--)
+					batch=dev->tx_flag[index]+batch;		
+				if(batch>=240){
+					goto ret;
+				}
+				skb=__skb_dequeue(&tmp_queue[i]);
+				rc = dev_hard_start_xmit(skb, dev, txq);
+			}
+ret:
+			rc=NETDEV_TX_OK;
+			//lock_flag=0;
+			rcu_read_unlock_bh();
+			return rc;
+		}		
+		
+	}*/
 #endif
-	trace_net_dev_queue(skb);
+
+		
+		/* Disable soft irqs for various locks below. Also
+		 * stops preemption for RCU.
+		 */
+normal:
+/*The RCU lock should be here*/
+		rcu_read_lock_bh();
+		q = rcu_dereference_bh(txq->qdisc);
+	
+	
+#ifdef CONFIG_NET_CLS_ACT
+		skb->tc_verd = SET_TC_AT(skb->tc_verd, AT_EGRESS);
+#endif
+		trace_net_dev_queue(skb);
+
+
 	if (q->enqueue) {
-		rc = __dev_xmit_skb(skb, q, dev, txq);
+		//if(dev->domid==0&&vif_index==0){
+			//struct sched_param * param;
+			//sched_getparam(0, param);
+			//printk("start_xmit qdisc=%d\n", q->q.qlen);
+		//}
+		//else if(dev->domid==1&&vif_index==20&&!memcmp(&(skb->cb[40]),"nic",3)){
+			//struct sched_param * param;
+			//sched_getparam(0, param);
+			//printk("recv\n");
+		//}
+		rc = __dev_xmit_skb(skb, q, dev, txq); 
 		goto out;
 	}
+test:
 
 	/* The device has no queue. Common case for software devices:
 	   loopback, all the sorts of tunnels...
@@ -2582,13 +2801,17 @@ int dev_queue_xmit(struct sk_buff *skb)
 
 		if (txq->xmit_lock_owner != cpu) {
 
-			if (__this_cpu_read(xmit_recursion) > RECURSION_LIMIT)
+			if (__this_cpu_read(xmit_recursion) > RECURSION_LIMIT){
 				goto recursion_alert;
 
-			HARD_TX_LOCK(dev, txq, cpu);
+			}
 
+			HARD_TX_LOCK(dev, txq, cpu);
+			
 			if (!netif_xmit_stopped(txq)) {
 				__this_cpu_inc(xmit_recursion);
+				//if(dev->domid==1)
+					//printk("after bridge\n");
 				rc = dev_hard_start_xmit(skb, dev, txq);
 				__this_cpu_dec(xmit_recursion);
 				if (dev_xmit_complete(rc)) {
@@ -2597,9 +2820,12 @@ int dev_queue_xmit(struct sk_buff *skb)
 				}
 			}
 			HARD_TX_UNLOCK(dev, txq);
+
 			if (net_ratelimit())
 				printk(KERN_CRIT "Virtual device %s asks to "
 				       "queue packet!\n", dev->name);
+
+
 		} else {
 			/* Recursion is detected! It is possible,
 			 * unfortunately
@@ -2610,7 +2836,7 @@ recursion_alert:
 				       "%s, fix it urgently!\n", dev->name);
 		}
 	}
-
+free:
 	rc = -ENETDOWN;
 	rcu_read_unlock_bh();
 
@@ -2618,6 +2844,7 @@ recursion_alert:
 	return rc;
 out:
 	rcu_read_unlock_bh();
+
 	return rc;
 }
 EXPORT_SYMBOL(dev_queue_xmit);
@@ -2631,6 +2858,8 @@ int netdev_max_backlog __read_mostly = 1000;
 int netdev_tstamp_prequeue __read_mostly = 1;
 int netdev_budget __read_mostly = 300;
 int weight_p __read_mostly = 64;            /* old backlog weight */
+int net_batch_size __read_mostly=10000;
+EXPORT_SYMBOL_GPL(net_batch_size);
 
 /* Called with irq disabled */
 static inline void ____napi_schedule(struct softnet_data *sd,
@@ -2963,6 +3192,7 @@ int netif_rx(struct sk_buff *skb)
 
 	net_timestamp_check(netdev_tstamp_prequeue, skb);
 
+
 	trace_netif_rx(skb);
 #ifdef CONFIG_RPS
 	if (static_branch(&rps_needed))	{
@@ -2993,6 +3223,8 @@ EXPORT_SYMBOL(netif_rx);
 
 int netif_rx_ni(struct sk_buff *skb)
 {
+	memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+	skb->cb[43]=skb->dev->priority+'0';
 	int err;
 
 	preempt_disable();
@@ -3005,8 +3237,135 @@ int netif_rx_ni(struct sk_buff *skb)
 }
 EXPORT_SYMBOL(netif_rx_ni);
 
+/*RTCA*/
+void vif_bridge(struct sk_buff *skb)
+{
+	struct packet_type *ptype, *pt_prev;
+	rx_handler_func_t *rx_handler;
+	struct net_device *orig_dev;
+	struct net_device *null_or_dev;
+	bool deliver_exact = false;
+	int ret = NET_RX_DROP;
+	__be16 type;
+	//skb->pkt_type=99;
+	memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+	skb->cb[43]=skb->dev->priority+'0';
+	
+	net_timestamp_check(!netdev_tstamp_prequeue, skb);
+
+	trace_netif_receive_skb(skb);
+
+	/* if we've gotten here through NAPI, check netpoll */
+	//if (netpoll_receive_skb(skb))
+		//return NET_RX_DROP;
+
+	if (!skb->skb_iif)
+		skb->skb_iif = skb->dev->ifindex;
+	orig_dev = skb->dev;
+
+	skb_reset_network_header(skb);
+	skb_reset_transport_header(skb);
+	skb_reset_mac_len(skb);
+
+	pt_prev = NULL;
+
+	//rcu_read_lock();
+
+another_round:
+
+	__this_cpu_inc(softnet_data.processed);
+
+	if (skb->protocol == cpu_to_be16(ETH_P_8021Q)) {
+		skb = vlan_untag(skb);
+		if (unlikely(!skb))
+			goto out;
+	}
+
+	list_for_each_entry_rcu(ptype, &ptype_all, list) {
+		if (!ptype->dev || ptype->dev == skb->dev) {
+			if (pt_prev)
+				ret = deliver_skb(skb, pt_prev, orig_dev);
+			pt_prev = ptype;
+		}
+	}
+
+	rx_handler = rcu_dereference(skb->dev->rx_handler);
+	if (vlan_tx_tag_present(skb)) {
+		if (pt_prev) {
+			ret = deliver_skb(skb, pt_prev, orig_dev);
+			pt_prev = NULL;
+		}
+		if (vlan_do_receive(&skb, !rx_handler))
+			goto another_round;
+		else if (unlikely(!skb))
+			goto out;
+	}
+
+	if (rx_handler) {
+		if (pt_prev) {
+			ret = deliver_skb(skb, pt_prev, orig_dev);
+			pt_prev = NULL;
+		}
+		
+		/*if(!memcmp(&(skb->cb[40]),"vif1",4)){
+					printk("fake bridge\n");
+					skb->dev=NIC_dev;
+					skb_push(skb, ETH_HLEN);
+					dev_queue_xmit(skb);
+					goto out;
+		}*/
+
+		switch (rx_handler(&skb)) {
+		case RX_HANDLER_CONSUMED:
+			goto out;
+		case RX_HANDLER_ANOTHER:
+			goto another_round;
+		case RX_HANDLER_EXACT:
+			deliver_exact = true;
+		case RX_HANDLER_PASS:
+			break;
+		default:
+			BUG();
+		}
+		
+	}
+
+	/* deliver only exact match when indicated */
+	null_or_dev = deliver_exact ? skb->dev : NULL;
+
+	type = skb->protocol;
+	list_for_each_entry_rcu(ptype,
+			&ptype_base[ntohs(type) & PTYPE_HASH_MASK], list) {
+		if (ptype->type == type &&
+		    (ptype->dev == null_or_dev || ptype->dev == skb->dev ||
+		     ptype->dev == orig_dev)) {
+			if (pt_prev)
+				ret = deliver_skb(skb, pt_prev, orig_dev);
+			pt_prev = ptype;
+		}
+	}
+
+	if (pt_prev) {
+		ret = pt_prev->func(skb, skb->dev, pt_prev, orig_dev);
+	} else {
+		atomic_long_inc(&skb->dev->rx_dropped);
+		kfree_skb(skb);
+		/* Jamal, now you will not able to escape explaining
+		 * me how you were going to use this. :-)
+		 */
+		ret = NET_RX_DROP;
+
+	}
+
+out:
+	//rcu_read_unlock();
+	ret=NET_RX_DROP;
+}
+EXPORT_SYMBOL(vif_bridge);
+
 static void net_tx_action(struct softirq_action *h)
 {
+	//in_tx_action=1;
 	struct softnet_data *sd = &__get_cpu_var(softnet_data);
 
 	if (sd->completion_queue) {
@@ -3061,6 +3420,7 @@ static void net_tx_action(struct softirq_action *h)
 			}
 		}
 	}
+	//in_tx_action=0;
 }
 
 #if (defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)) && \
@@ -3261,6 +3621,7 @@ ncls:
 			ret = deliver_skb(skb, pt_prev, orig_dev);
 			pt_prev = NULL;
 		}
+
 		switch (rx_handler(&skb)) {
 		case RX_HANDLER_CONSUMED:
 			goto out;
@@ -3323,6 +3684,8 @@ out:
  */
 int netif_receive_skb(struct sk_buff *skb)
 {
+	//printk("%s\n", __func__);
+
 	net_timestamp_check(netdev_tstamp_prequeue, skb);
 
 	if (skb_defer_rx_timestamp(skb))
@@ -3541,20 +3904,143 @@ __napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 	return dev_gro_receive(napi, skb);
 }
 
+/*RTCA*/
 gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 {
+	//printk("%s\n", __func__);
+
+	//printk("%s, %d\n", __func__,skb_num);
+	struct ethhdr *eth_header=(struct ethhdr *)skb_mac_header(skb);
+			struct iphdr * ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+			struct udphdr *udp_header=(struct udphdr *)((char *)ip_header+sizeof(struct iphdr));
 	switch (ret) {
 	case GRO_NORMAL:
+		{
+			
+			
+
+		//if(eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->source==htons(8000)){
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+			//printk("3\n");	
+		
+		//}
+
+			struct softnet_data *sd;
+			sd=&__get_cpu_var(softnet_data);
+			int i;
+			for(i=0;i<sd->dom_index;i++){
+				if(!compare_ether_addr(eth_header->h_dest,sd->localdoms[i]))
+					break;
+			}
+
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->dest==htons(8000)){
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+				//memcpy(&(skb->cb[40]), "nic",3); //this is a packet coming from guest domain
+				//skb->cb[43]='0';
+				//printk("come\n");
+				//in_action=1;
+			
+			//}
+
+
+#ifdef NEW
+		unsigned long flags;
+		//i=sd->dom_index;
+		{
+			if(i<sd->dom_index){
+				/*if(sd->priority_queue[i].qlen>1000){
+					goto drop_process;
+				}
+				skb_reset_network_header(skb);
+				skb_reset_transport_header(skb);
+				skb_reset_mac_len(skb);
+				skb->dev=sd->dev_queue[i];
+				skb_push(skb, ETH_HLEN);
+				local_irq_save(flags);
+				__skb_queue_tail(&sd->priority_queue[i], skb);
+				(sd->input_pkt_nr)++;
+				local_irq_restore(flags);*/
+				//if(i==1)
+					//printk("pkt to dom2\n");
+	
+				if(eth_header->h_proto!=htons(ETH_P_ARP)){
+				//if(eth_header->h_proto==htons(ETH_P_IP)&&((ip_header->protocol==IPPROTO_TCP)||(ip_header->protocol==IPPROTO_UDP))){
+					//skb->pkt_type=PACKET_SKIPBRIDGE;
+					//if(net_batch_size==17&& i==0 )
+						//printk("3\n");
+					rcu_read_lock();
+					net_timestamp_check(netdev_tstamp_prequeue, skb);
+
+					skb_defer_rx_timestamp(skb);
+					skb_reset_network_header(skb);
+					skb_reset_transport_header(skb);
+					skb_reset_mac_len(skb);
+					
+					skb->dev=sd->dev_queue[i];
+					//memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+					//skb->cb[43]=skb->dev->priority+'0';
+					skb_push(skb, ETH_HLEN);
+					if(net_batch_size==39&&i==0){
+						struct timeval time1;
+							do_gettimeofday(&time1);
+							sprintf(pkt_stamp[pkt_index],"[%ld]dev", time1.tv_sec*1000000+time1.tv_usec);
+							printk("%s\n", pkt_stamp[pkt_index]);
+							//pkt_index++;
+						//printk("rxin\n");
+					}
+					dev_queue_xmit(skb);
+					rcu_read_unlock();
+				}
+				else{
+					net_timestamp_check(netdev_tstamp_prequeue, skb);
+
+					skb_defer_rx_timestamp(skb);
+					if(net_batch_size==39&&i==0){
+						struct timeval time1;
+							do_gettimeofday(&time1);
+							sprintf(pkt_stamp[pkt_index],"[%ld]bridge", time1.tv_sec*1000000+time1.tv_usec);
+							printk("%s\n", pkt_stamp[pkt_index]);
+							//pkt_index++;
+						//printk("rxin\n");
+					}
+					__netif_receive_skb(skb);
+				}
+															
+			}
+			else{
+				
+				
+				/*if(sd->priority_queue[5].qlen>1000){
+					goto drop_process;
+				}
+				local_irq_save(flags);
+				__skb_queue_tail(&sd->priority_queue[5], skb);
+				(sd->input_pkt_nr)++;
+				local_irq_restore(flags);*/
+				__netif_receive_skb(skb);
+			}
+			
+			return ret;
+drop_process:
+			sd->dropped++;			
+
+			kfree_skb(skb);
+			return GRO_DROP;
+		}
+#endif
+
+normal:
 		if (netif_receive_skb(skb))
 			ret = GRO_DROP;
+		}
 		break;
 
-	case GRO_DROP:
+	case GRO_DROP: 
 	case GRO_MERGED_FREE:
 		kfree_skb(skb);
 		break;
 
-	case GRO_HELD:
+	case GRO_HELD: 
 	case GRO_MERGED:
 		break;
 	}
@@ -3714,8 +4200,66 @@ static void net_rps_action_and_irq_enable(struct softnet_data *sd)
 		local_irq_enable();
 }
 
+
+/*RTCA*/
+int process_net_recv(int i, int quota)
+{
+	int work = 0;
+	int rc=0;
+	struct softnet_data *queue = &__get_cpu_var(softnet_data);
+	unsigned long start_time = jiffies;
+
+	struct packet_type *ptype, *pt_prev;
+	rx_handler_func_t *rx_handler;
+	struct net_device *orig_dev;
+	__be16 type;
+
+	if (queue->input_pkt_nr == 0) {
+        return work;
+	}
+
+	do {
+		struct sk_buff *skb;
+		local_irq_disable();
+		skb =__skb_dequeue(&queue->priority_queue[i]);
+		local_irq_enable();
+		if(!skb){
+			break;
+		}
+		if(skb->dev->domid!=0){
+			rcu_read_lock();
+
+			//skb->dev=queue->dev_queue[i];
+			//skb_push(skb, ETH_HLEN);
+			rc=dev_queue_xmit(skb);
+			rcu_read_unlock();
+			
+		}
+		else{
+			__netif_receive_skb(skb);	
+		}
+		if(rc==8888){
+			//printk("congestion in vif\n");
+			__skb_queue_head(&queue->priority_queue[i], skb);
+			break;
+		}
+	} while (++work < quota && jiffies == start_time);
+
+
+	local_irq_disable();
+	queue->input_pkt_nr -= work;
+	
+	local_irq_enable();
+
+	return rc;
+}
+EXPORT_SYMBOL(process_net_recv);
+
+
 static int process_backlog(struct napi_struct *napi, int quota)
 {
+	//printk("%s\n", __func__);
+
 	int work = 0;
 	struct softnet_data *sd = container_of(napi, struct softnet_data, backlog);
 
@@ -3771,6 +4315,7 @@ static int process_backlog(struct napi_struct *napi, int quota)
 	return work;
 }
 
+
 /**
  * __napi_schedule - schedule for receive
  * @n: entry to schedule
@@ -3786,6 +4331,17 @@ void __napi_schedule(struct napi_struct *n)
 	local_irq_restore(flags);
 }
 EXPORT_SYMBOL(__napi_schedule);
+
+void net_recv_schedule()
+{
+	unsigned long flags;
+	//net_recv_napi=n;
+	local_irq_save(flags);
+	__raise_softirq_irqoff(NET_TX_SOFTIRQ);
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL(net_recv_schedule);
+
 
 void __napi_complete(struct napi_struct *n)
 {
@@ -3861,37 +4417,26 @@ static void net_rx_action(struct softirq_action *h)
 	void *have;
 
 	local_irq_disable();
-
+	//printk("input_q=%d\n",sd->input_pkt_queue.qlen);
+	//input_qlen=sd->input_pkt_queue.qlen;
 	while (!list_empty(&sd->poll_list)) {
 		struct napi_struct *n;
 		int work, weight;
 
-		/* If softirq window is exhuasted then punt.
-		 * Allow this to run for 2 jiffies since which will allow
-		 * an average latency of 1.5/HZ.
-		 */
+
 		if (unlikely(budget <= 0 || time_after(jiffies, time_limit)))
 			goto softnet_break;
 
 		local_irq_enable();
 
-		/* Even though interrupts have been re-enabled, this
-		 * access is safe because interrupts can only add new
-		 * entries to the tail of this list, and only ->poll()
-		 * calls can remove this head entry from the list.
-		 */
+
 		n = list_first_entry(&sd->poll_list, struct napi_struct, poll_list);
 
 		have = netpoll_poll_lock(n);
 
 		weight = n->weight;
 
-		/* This NAPI_STATE_SCHED test is for avoiding a race
-		 * with netpoll's poll_napi().  Only the entity which
-		 * obtains the lock and sees NAPI_STATE_SCHED set will
-		 * actually make the ->poll() call.  Therefore we avoid
-		 * accidentally calling ->poll() when NAPI is not scheduled.
-		 */
+
 		work = 0;
 		if (test_bit(NAPI_STATE_SCHED, &n->state)) {
 			work = n->poll(n, weight);
@@ -3904,11 +4449,7 @@ static void net_rx_action(struct softirq_action *h)
 
 		local_irq_disable();
 
-		/* Drivers must not modify the NAPI state if they
-		 * consume the entire weight.  In such cases this code
-		 * still "owns" the NAPI instance and therefore can
-		 * move the instance around on the list at-will.
-		 */
+
 		if (unlikely(work == weight)) {
 			if (unlikely(napi_disable_pending(n))) {
 				local_irq_enable();
@@ -3924,20 +4465,23 @@ out:
 	net_rps_action_and_irq_enable(sd);
 
 #ifdef CONFIG_NET_DMA
-	/*
-	 * There may not be any more sk_buffs coming right now, so push
-	 * any pending DMA copies to hardware
-	 */
+
 	dma_issue_pending_all();
 #endif
-
+	if(in_action){
+		in_action=0;
+		printk("recvleave\n");
+	}
 	return;
 
 softnet_break:
+	//printk("budget=%d, %d\n", budget, current->pid);
 	sd->time_squeeze++;
 	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 	goto out;
 }
+
+
 
 static gifconf_func_t *gifconf_list[NPROTO];
 
@@ -6532,6 +7076,7 @@ static struct pernet_operations __net_initdata default_device_ops = {
  */
 static int __init net_dev_init(void)
 {
+	
 	int i, rc = -ENOMEM;
 
 	BUG_ON(!dev_boot_phase);
@@ -6543,6 +7088,12 @@ static int __init net_dev_init(void)
 		goto out;
 
 	INIT_LIST_HEAD(&ptype_all);
+
+	for (i=0;i<8000;i++){
+		pkt_stamp[i]=kmalloc(50,GFP_KERNEL);
+	}
+	pkt_index=0;
+	cleaned=0;
 	for (i = 0; i < PTYPE_HASH_SIZE; i++)
 		INIT_LIST_HEAD(&ptype_base[i]);
 
@@ -6570,10 +7121,35 @@ static int __init net_dev_init(void)
 		sd->cpu = i;
 #endif
 
+		/*RTCA*/
+		sd->input_pkt_nr = 0;
+		skb_queue_head_init(&sd->priority_queue[0]);
+		skb_queue_head_init(&sd->priority_queue[1]);
+		skb_queue_head_init(&sd->priority_queue[2]);
+		skb_queue_head_init(&sd->priority_queue[3]);
+		skb_queue_head_init(&sd->priority_queue[4]);
+		skb_queue_head_init(&sd->priority_queue[5]);
+		
+		skb_queue_head_init(&tmp_queue[0]);
+		skb_queue_head_init(&tmp_queue[1]);
+		skb_queue_head_init(&tmp_queue[2]);
+		skb_queue_head_init(&tmp_queue[3]);
+		skb_queue_head_init(&tmp_queue[4]);
+		skb_queue_head_init(&tmp_queue[5]);
+		lock_flag=0;
+
 		sd->backlog.poll = process_backlog;
 		sd->backlog.weight = weight_p;
 		sd->backlog.gro_list = NULL;
 		sd->backlog.gro_count = 0;
+
+		netbk_wq[0]=NULL;
+		netbk_wq[1]=NULL;
+		netbk_wq[2]=NULL;
+		netbk_wq[3]=NULL;
+		netbk_wq[4]=NULL;
+		netbk_wq[5]=NULL;
+
 	}
 
 	dev_boot_phase = 0;

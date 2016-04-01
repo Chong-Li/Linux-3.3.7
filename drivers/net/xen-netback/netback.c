@@ -45,6 +45,14 @@
 
 #include <asm/xen/hypercall.h>
 #include <asm/xen/page.h>
+#include <linux/sched.h>
+#include <linux/kernel.h>
+
+
+#define NEW_NETBACK
+
+int in_submit;
+extern int in_echo;
 
 struct pending_tx_info {
 	struct xen_netif_tx_request req;
@@ -58,6 +66,7 @@ struct netbk_rx_meta {
 	int gso_size;
 };
 
+/*RTCA, 256 originally*/
 #define MAX_PENDING_REQS 256
 
 /* Discriminate from any valid pending_idx value. */
@@ -80,12 +89,24 @@ union page_ext {
 	void *mapping;
 };
 
+
+
 struct xen_netbk {
+/*RTCA*/
+	int priority; //add priority attr to netback device
 	wait_queue_head_t wq;
+	wait_queue_head_t tx_wq;
 	struct task_struct *task;
 
+	struct xenvif *vif;
+
 	struct sk_buff_head rx_queue;
+	struct sk_buff_head rx_queue_backup;
 	struct sk_buff_head tx_queue;
+	struct sk_buff_head tx_queue_backup;
+
+	int gso_flag;
+	struct sk_buff *gso_skb;
 
 	struct timer_list net_timer;
 
@@ -135,7 +156,26 @@ void xen_netbk_add_xenvif(struct xenvif *vif)
 
 	netbk = &xen_netbk[min_group];
 
+/*RTCA*/
+#ifdef NEW_NETBACK
+	if(vif->domid>5){
+		netbk=&xen_netbk[5];
+		netbk->priority=5;
+	}
+
+	else{
+		netbk=&xen_netbk[vif->domid-1];
+		netbk->priority=vif->domid-1;
+		if(vif->domid==2 ||vif->domid==3||vif->domid==4||vif->domid==5){
+			netbk=&xen_netbk[1];
+			netbk->priority=1;
+		}
+	}
+	//if(vif->domid==1||vif->domid==2)
+		netbk->vif=NULL;
+#endif
 	vif->netbk = netbk;
+	
 	atomic_inc(&netbk->netfront_count);
 }
 
@@ -241,7 +281,14 @@ static inline pending_ring_idx_t nr_pending_reqs(struct xen_netbk *netbk)
 
 static void xen_netbk_kick_thread(struct xen_netbk *netbk)
 {
-	wake_up(&netbk->wq);
+	//wake_up(&netbk->wq);
+	if(!list_empty(&((netbk->wq).task_list))){
+		wake_up(&netbk->wq);
+
+	}
+
+	//if(netbk->priority==0)
+		//printk("kick, %d %d %d\n", tx_work_todo(netbk), netbk->tx_queue.qlen, tx_ring_unused());
 }
 
 static int max_required_rx_slots(struct xenvif *vif)
@@ -590,6 +637,7 @@ struct skb_cb_overlay {
 	int meta_slots_used;
 };
 
+
 static void xen_netbk_rx_action(struct xen_netbk *netbk)
 {
 	struct xenvif *vif = NULL, *tmp;
@@ -614,7 +662,16 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 
 	count = 0;
 
+
 	while ((skb = skb_dequeue(&netbk->rx_queue)) != NULL) {
+		if(net_batch_size==39&&skb->dev->priority==0){
+		struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]rxin2", time1.tv_sec*1000000+time1.tv_usec);
+			printk("%s\n", pkt_stamp[pkt_index]);
+			//pkt_index++;
+		//printk("rxin\n");
+	}
 		vif = netdev_priv(skb->dev);
 		nr_frags = skb_shinfo(skb)->nr_frags;
 
@@ -641,6 +698,42 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 	BUG_ON(ret != 0);
 
 	while ((skb = __skb_dequeue(&rxq)) != NULL) {
+		//printk("Process one skb to %s\n", skb->dev->name);
+		//eth_header=(struct ethhdr *)skb_mac_header(skb);
+		//ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->dest==htons(8000)){
+		//if(skb->dev->priority==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+		if(net_batch_size==39&& skb->dev->priority==0 ){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]4", time1.tv_sec*1000000+time1.tv_usec);
+			printk("%s\n", pkt_stamp[pkt_index]);
+			//pkt_index++;
+			//printk("4\n");	 
+			/*if(pkt_index>7000){
+				
+				int pkt_i;
+				for(pkt_i=0; pkt_i<pkt_index; pkt_i++){
+					printk("%s\n", pkt_stamp[pkt_i]);
+				}
+				printk("\n\n\n\n\n\n\n\n\n\n\n\n\n");
+				pkt_index=0;
+			}*/
+		}
+		if(net_batch_size==41){
+			pkt_index=0;
+			//printk("4\n");
+		}
+				/*struct ethhdr *eth_header=(struct ethhdr *)skb_mac_header(skb);
+		struct iphdr * ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+		struct udphdr *udp_header=(struct udphdr *)((char *)ip_header+sizeof(struct iphdr));
+			
+
+		if(eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->source==htons(8000)){
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+			printk("4\n");	
+		}*/
 		sco = (struct skb_cb_overlay *)skb->cb;
 
 		vif = netdev_priv(skb->dev);
@@ -710,6 +803,8 @@ static void xen_netbk_rx_action(struct xen_netbk *netbk)
 
 		xenvif_notify_tx_completion(vif);
 
+
+
 		xenvif_put(vif);
 		npo.meta_cons += sco->meta_slots_used;
 		dev_kfree_skb(skb);
@@ -730,11 +825,17 @@ void xen_netbk_queue_tx_skb(struct xenvif *vif, struct sk_buff *skb)
 {
 	struct xen_netbk *netbk = vif->netbk;
 
+	//if(skb->dev->domid==1)
+		//printk("rx_queue=%d\n",netbk->rx_queue.qlen);
 	skb_queue_tail(&netbk->rx_queue, skb);
 
 	xen_netbk_kick_thread(netbk);
 }
 
+void kick_rx_backup(struct xenvif *vif){
+
+	xen_netbk_kick_thread(vif->netbk);
+}
 static void xen_netbk_alarm(unsigned long data)
 {
 	struct xen_netbk *netbk = (struct xen_netbk *)data;
@@ -798,6 +899,8 @@ kick:
 	    !list_empty(&netbk->net_schedule_list))
 		xen_netbk_kick_thread(netbk);
 }
+
+
 
 void xen_netbk_deschedule_xenvif(struct xenvif *vif)
 {
@@ -1215,8 +1318,25 @@ static bool tx_credit_exceeded(struct xenvif *vif, unsigned size)
 	return false;
 }
 
+static inline int rx_work_todo(struct xen_netbk *netbk)
+{
+	return !skb_queue_empty(&netbk->rx_queue);
+}
+
+static inline int tx_work_todo(struct xen_netbk *netbk)
+{
+
+	if (((nr_pending_reqs(netbk) + MAX_SKB_FRAGS) < MAX_PENDING_REQS) &&
+			!list_empty(&netbk->net_schedule_list))
+		return 1;
+
+	return 0;
+}
+
 static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 {
+	//if(in_echo)
+		//printk("build\n");
 	struct gnttab_copy *gop = netbk->tx_copy_ops, *request_gop;
 	struct sk_buff *skb;
 	int ret;
@@ -1365,7 +1485,17 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 		}
 
 		__skb_queue_tail(&netbk->tx_queue, skb);
-
+		//if(skb->dev->priority==0){
+			//printk("in build, qlen=%d, in_echo=%d\n", netbk->tx_queue.qlen, in_echo);
+		//}
+		if(net_batch_size==39&& vif->domid==1 ){
+			struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]txin", time1.tv_sec*1000000+time1.tv_usec);
+			printk("%s\n", pkt_stamp[pkt_index]);
+			//pkt_index++;
+			//printk("txin\n");
+		}
 		netbk->pending_cons++;
 
 		request_gop = xen_netbk_get_requests(netbk, vif,
@@ -1382,7 +1512,11 @@ static unsigned xen_netbk_tx_build_gops(struct xen_netbk *netbk)
 
 		if ((gop-netbk->tx_copy_ops) >= ARRAY_SIZE(netbk->tx_copy_ops))
 			break;
+
 	}
+
+	//if(in_echo)
+		//printk("end build\n");
 
 	return gop - netbk->tx_copy_ops;
 }
@@ -1391,8 +1525,60 @@ static void xen_netbk_tx_submit(struct xen_netbk *netbk)
 {
 	struct gnttab_copy *gop = netbk->tx_copy_ops;
 	struct sk_buff *skb;
-
+	struct ethhdr *eth_header;
+	struct iphdr * ip_header;
+	struct softnet_data *sd;
+	sd=&__get_cpu_var(softnet_data);
+	int i;
+	int netbk_index=0;
+	int vif_index;
+	//printk("tx_queue=%d\n",netbk->tx_queue.qlen);
+	int qlen=netbk->tx_queue.qlen;
+	int rc;
+	//if(netbk->priority==1)
+		//printk("2222_submit, %d\n", qlen);
+	//if(netbk->priority==0)
+		//printk("1111_submit\n");
+	//if(in_echo){
+		//printk("begin_submit\n");
+	//}
 	while ((skb = __skb_dequeue(&netbk->tx_queue)) != NULL) {
+			//printk(" !!!!!!!return len=%d, data_len=%d\n", skb->len, skb->data_len);
+			//int i;
+			//for (i = (int)skb_shinfo(skb)->nr_frags - 1; i >= 0; i--)
+				//printk(" frag[%d]=%d , ", i, skb_frag_size(&skb_shinfo(skb)->frags[i]));
+		
+#ifdef NEW_NETBACK
+		//if(netbk->priority!=0){
+			//for(vif_index=0;vif_index<=netbk->priority;vif_index++){
+				//if(NIC_dev->tx_flag[netbk->priority]>net_batch_size){
+					//__skb_queue_head(&netbk->tx_queue, skb);
+					//return;
+				//}
+			//}
+		//}
+		//printk("netbakc, %d\n",tx_ring_unused());
+		//skb->cb[46]=tx_ring_unused()+'0';
+		if(BQL_flag==0||DQL_flag==0){
+			//if(netbk->priority==1)
+				//printk("2222 congestion, qlen=%d\n",netbk->tx_queue.qlen);
+			//printk("\nlen=%d, data_len=%d\n", skb->len, skb->data_len);
+			//int i;
+			//for (i = (int)skb_shinfo(skb)->nr_frags - 1; i >= 0; i--)
+				//printk(" frag[%d]=%d , ", i, skb_frag_size(&skb_shinfo(skb)->frags[i]));
+			
+			
+			__skb_queue_head(&netbk->tx_queue, skb);
+			//printk("\nback");
+			
+			break;
+		}
+		//if(netbk->priority==0)
+			//printk("unused slots=%d\n",tx_ring_unused());
+		else
+			rcu_read_lock();
+
+#endif
 		struct xen_netif_tx_request *txp;
 		struct xenvif *vif;
 		u16 pending_idx;
@@ -1407,6 +1593,9 @@ static void xen_netbk_tx_submit(struct xen_netbk *netbk)
 			netdev_dbg(vif->dev, "netback grant failed.\n");
 			skb_shinfo(skb)->nr_frags = 0;
 			kfree_skb(skb);
+#ifdef NEW_NETBACK
+			rcu_read_unlock();
+#endif
 			continue;
 		}
 
@@ -1447,33 +1636,177 @@ static void xen_netbk_tx_submit(struct xen_netbk *netbk)
 			netdev_dbg(vif->dev,
 				   "Can't setup checksum in net_tx_action\n");
 			kfree_skb(skb);
+#ifdef NEW_NETBACK
+			rcu_read_unlock();
+#endif
+
 			continue;
 		}
 
 		vif->dev->stats.rx_bytes += skb->len;
 		vif->dev->stats.rx_packets++;
 
+		
+		eth_header=(struct ethhdr *)skb_mac_header(skb);
+		//ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+
+			//if(i==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==0x11&&udp_header->dest==htons(8000)){
+		//if(skb->dev->priority==0&&eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_ICMP){
+		//if(skb->dev->priority==0){
+			//struct sched_param * param;
+			//sched_getparam(0, param);
+			//printk("submit, left=%d, qlen_whole=%d\n", netbk->tx_queue.qlen, qlen);
+			//in_submit=1;
+		//}
+
+/*RTCA*/		
+#ifdef NEW_NETBACK
+
+			//if(netbk->tx_queue.qlen>1000){
+				//kfree_skb(skb);
+				//rcu_read_unlock();
+				//continue;
+			//}
+		
+			eth_header=(struct ethhdr *)skb_mac_header(skb);
+			ip_header=(struct iphdr *)((char *)eth_header+sizeof(struct ethhdr));
+			
+			//if(eth_header->h_proto==htons(ETH_P_IP)&&ip_header->protocol==IPPROTO_TCP){
+				//vif_bridge(skb);
+				//goto normal;
+			//}
+			
+			for(i=0;i<sd->dom_index;i++){
+				if(!compare_ether_addr(eth_header->h_dest,sd->localdoms[i]))
+					break;
+			}
+
+			if(i<sd->dom_index){
+				if(eth_header->h_proto!=htons(ETH_P_ARP)){
+				//if(eth_header->h_proto==htons(ETH_P_IP)&&((ip_header->protocol==IPPROTO_TCP)||(ip_header->protocol==IPPROTO_UDP))){
+						memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+						skb->cb[43]=skb->dev->priority+'0';
+						//rcu_read_lock();
+
+						skb->dev=sd->dev_queue[i];
+						skb_push(skb, ETH_HLEN);
+						dev_queue_xmit(skb);
+						//rcu_read_unlock();
+				}
+				else{
+					vif_bridge(skb);
+				}
+			}
+			else{
+				if(eth_header->h_proto!=htons(ETH_P_ARP)){
+				//if(eth_header->h_proto==htons(ETH_P_IP)&&((ip_header->protocol==IPPROTO_TCP)||(ip_header->protocol==IPPROTO_UDP))){
+						memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+						skb->cb[43]=skb->dev->priority+'0';
+						//rcu_read_lock();
+						//skb->dev=sd->dev_queue[i];
+						/*if(netbk->priority==1){
+							if(ip_header->protocol==IPPROTO_TCP){
+								printk("tot_len=%d, id=%d, frag=%d\n",ip_header->tot_len, ip_header->id, ip_header->frag_off);
+								memcpy(&(skb->cb[40]), "vif",3); //this is a packet coming from guest domain
+								skb->cb[43]=skb->dev->priority+'0';
+
+							}
+						}*/
+						//if(netbk->priority==1)
+							//printk("2222_go, qlen=%d\n", netbk->tx_queue.qlen);
+						//if(netbk->priority==0)
+							//printk("1111_go\n");
+						skb_reset_network_header(skb);
+						skb_reset_transport_header(skb);
+						skb_reset_mac_len(skb);
+						skb->dev=NIC_dev;
+						skb_push(skb, ETH_HLEN);
+						if(net_batch_size==39&& vif->domid==1 ){
+							struct timeval time1;
+							do_gettimeofday(&time1);
+							sprintf(pkt_stamp[pkt_index],"[%ld]txout", time1.tv_sec*1000000+time1.tv_usec);
+							printk("%s\n", pkt_stamp[pkt_index]);
+							//pkt_index++;
+							//printk("txout\n");
+						}
+						rc=dev_queue_xmit(skb);
+						if(rc==110){
+							//__skb_queue_head(&netbk->tx_queue, skb);
+							netbk->gso_skb=skb;
+							netbk->gso_flag=1;
+							rcu_read_unlock();
+							break;
+						}
+						//rcu_read_unlock();
+				}
+				else{
+					vif_bridge(skb);
+				}
+			}
+
+			//vif_bridge(skb);
+
+normal:
+			rcu_read_unlock();
+
+			/*
+			for(netbk_index=0;netbk_index<netbk->priority;netbk_index++){
+				if(rx_work_todo(&xen_netbk[netbk_index])||tx_work_todo(&xen_netbk[netbk_index])||xen_netbk[netbk_index].tx_queue.qlen>0){
+					wake_up(&(xen_netbk[netbk_index].wq));
+					return;
+				}
+			}
+			*/
+			
+			continue;	
+	#endif
+	
+#ifndef NEW_NETBACK
 		xenvif_receive_skb(vif, skb);
+#endif
+		
 	}
+	//printk("end of submit, netbk=%d\n", netbk->priority+1);
+	/*if(in_echo){
+		printk("no echo submit\n");
+	}
+	if(in_submit){
+		printk("end of submit\n");
+		in_submit=0;
+		in_echo=0;
+	}*/
 }
 
 /* Called after netfront has transmitted */
 static void xen_netbk_tx_action(struct xen_netbk *netbk)
 {
+//if(in_echo){
+	//printk("start_tx_action\n");
+//}
+//#ifdef NEW_NETBACK
+	//if(netbk->tx_queue.qlen>1000)
+		//goto submit;
+//#endif
 	unsigned nr_gops;
 	int ret;
 
 	nr_gops = xen_netbk_tx_build_gops(netbk);
 
+#ifdef NEW_NETBACK
+	goto going;
+#endif
+
 	if (nr_gops == 0)
 		return;
+going:
 	ret = HYPERVISOR_grant_table_op(GNTTABOP_copy,
 					netbk->tx_copy_ops, nr_gops);
 	BUG_ON(ret);
-
+submit:
 	xen_netbk_tx_submit(netbk);
 
 }
+
 
 static void xen_netbk_idx_release(struct xen_netbk *netbk, u16 pending_idx)
 {
@@ -1545,24 +1878,14 @@ static struct xen_netif_rx_response *make_rx_response(struct xenvif *vif,
 	return resp;
 }
 
-static inline int rx_work_todo(struct xen_netbk *netbk)
-{
-	return !skb_queue_empty(&netbk->rx_queue);
-}
 
-static inline int tx_work_todo(struct xen_netbk *netbk)
-{
 
-	if (((nr_pending_reqs(netbk) + MAX_SKB_FRAGS) < MAX_PENDING_REQS) &&
-			!list_empty(&netbk->net_schedule_list))
-		return 1;
-
-	return 0;
-}
 
 static int xen_netbk_kthread(void *data)
 {
 	struct xen_netbk *netbk = data;
+	
+	
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(netbk->wq,
 				rx_work_todo(netbk) ||
@@ -1573,11 +1896,92 @@ static int xen_netbk_kthread(void *data)
 		if (kthread_should_stop())
 			break;
 
-		if (rx_work_todo(netbk))
+		if (rx_work_todo(netbk)){
+			//if(netbk->priority==0)
+				//printk("pkt0 into rx_action\n");
 			xen_netbk_rx_action(netbk);
+		}
 
-		if (tx_work_todo(netbk))
+		if (tx_work_todo(netbk)){
 			xen_netbk_tx_action(netbk);
+		}
+	}
+
+	return 0;
+}
+
+
+/*RTCA*/
+
+static int rtca_netbk_kthread(void *data)
+{
+	struct xen_netbk *netbk = data;
+	
+	int kthread_priority=96-netbk->priority;
+	printk("~~~~~~~kthread_priority=%d~~~~~~~~\n", kthread_priority);
+	struct sched_param net_recv_param={.sched_priority=kthread_priority};
+	sched_setscheduler_nocheck(current,SCHED_FIFO,&net_recv_param);
+
+	
+	while (!kthread_should_stop()) {
+		//netbk->wq
+		wait_event_interruptible(netbk->wq,
+				(rx_work_todo(netbk)||(netbk->vif!=NULL&&netbk->vif->rx_queue_backup.qlen>0&&xenvif_rx_schedulable(netbk->vif))) ||//!test_bit(__QUEUE_STATE_STACK_XOFF, &((struct netdev_queue *)(&NIC_dev->_tx[0]))->state))
+				((tx_work_todo(netbk) ||netbk->tx_queue.qlen>0||netbk->gso_skb)) ||
+				kthread_should_stop());
+		wait_event_interruptible(netbk->tx_wq, ((BQL_flag==1)&&(DQL_flag==1))||(rx_work_todo(netbk)||(netbk->vif!=NULL&&netbk->vif->rx_queue_backup.qlen>0&&xenvif_rx_schedulable(netbk->vif))));
+		cond_resched();
+
+
+		if (kthread_should_stop())
+			break;
+
+		//if(netbk->priority==0)
+			//printk("running\n");
+		if (rx_work_todo(netbk)){
+			//if(netbk->priority==1)
+				//printk(" into rx_action, qlen=%d\n", netbk->rx_queue.qlen);
+			xen_netbk_rx_action(netbk);
+		}
+		if(netbk->vif!=NULL&&netbk->vif->rx_queue_backup.qlen>0&&xenvif_rx_schedulable(netbk->vif)){
+			struct sk_buff *skb;
+			while(netbk->vif->rx_queue_backup.qlen>0){
+				if (!xenvif_rx_schedulable(netbk->vif))
+					break;	
+				skb=skb_dequeue(&netbk->vif->rx_queue_backup);
+				netbk->vif->rx_req_cons_peek += xen_netbk_count_skb_slots(netbk->vif,skb );
+				xenvif_get(netbk->vif);
+				skb_queue_tail(&netbk->rx_queue, skb);
+			}
+			//if(netbk->priority==1)
+				//printk("backup into rx_action, qlen=%d\n", netbk->rx_queue.qlen);
+			xen_netbk_rx_action(netbk);
+		}
+		if(netbk->gso_skb && (BQL_flag==1) && (DQL_flag==1)){
+				netbk->gso_flag=0;
+				rcu_read_lock();
+				rcu_read_lock_bh();
+				struct sk_buff *skb2=netbk->gso_skb;
+				netbk->gso_skb=NULL;
+				int rc;
+				rc=dev_hard_start_xmit(skb2, NIC_dev, &NIC_dev->_tx[0]);
+				rcu_read_unlock_bh();
+				rcu_read_unlock();
+				
+				if(rc==110){
+					//__skb_queue_head(&netbk->tx_queue, skb);
+					netbk->gso_skb=skb2;
+					netbk->gso_flag=1;
+					continue;
+				}
+				
+		}
+		if ((tx_work_todo(netbk)||netbk->tx_queue.qlen>0)&&(BQL_flag==1)&&(DQL_flag==1)){
+					//if(netbk->priority==0)
+						//printk("tx_action\n");
+			xen_netbk_tx_action(netbk);
+		}
+		
 	}
 
 	return 0;
@@ -1638,6 +2042,11 @@ static int __init netback_init(void)
 		return -ENODEV;
 
 	xen_netbk_group_nr = num_online_cpus();
+
+/*RTCA*/
+#ifdef NEW_NETBACK
+	xen_netbk_group_nr=6;
+#endif
 	xen_netbk = vzalloc(sizeof(struct xen_netbk) * xen_netbk_group_nr);
 	if (!xen_netbk) {
 		printk(KERN_ALERT "%s: out of memory\n", __func__);
@@ -1645,9 +2054,14 @@ static int __init netback_init(void)
 	}
 
 	for (group = 0; group < xen_netbk_group_nr; group++) {
+		printk("~~~~~~\n ~~~~~~~\n ~~~~~~~\n group==%d ~~~~~~~~~~~~~~~~~\n", group);
 		struct xen_netbk *netbk = &xen_netbk[group];
 		skb_queue_head_init(&netbk->rx_queue);
+		skb_queue_head_init(&netbk->rx_queue_backup);
 		skb_queue_head_init(&netbk->tx_queue);
+		skb_queue_head_init(&netbk->tx_queue_backup);
+		netbk->gso_flag=0;
+		netbk->gso_skb=NULL;
 
 		init_timer(&netbk->net_timer);
 		netbk->net_timer.data = (unsigned long)netbk;
@@ -1655,22 +2069,42 @@ static int __init netback_init(void)
 
 		netbk->pending_cons = 0;
 		netbk->pending_prod = MAX_PENDING_REQS;
+/*RTCA*/
+		netbk->priority=group;
 		for (i = 0; i < MAX_PENDING_REQS; i++)
 			netbk->pending_ring[i] = i;
 
 		init_waitqueue_head(&netbk->wq);
+		init_waitqueue_head(&netbk->tx_wq);
+		netbk_wq[group]=&netbk->wq;
+		netbk_tx_wq[group]=&netbk->tx_wq;
+#ifndef NEW_NETBACK
 		netbk->task = kthread_create(xen_netbk_kthread,
 					     (void *)netbk,
 					     "netback/%u", group);
+#endif
 
+#ifdef NEW_NETBACK
+		netbk->task = kthread_create(rtca_netbk_kthread,
+					     (void *)netbk,
+					     "netback/%u", group);
+#endif
 		if (IS_ERR(netbk->task)) {
 			printk(KERN_ALERT "kthread_create() fails at netback\n");
 			del_timer(&netbk->net_timer);
 			rc = PTR_ERR(netbk->task);
 			goto failed_init;
 		}
-
+#ifndef NEW_NETBACK
 		kthread_bind(netbk->task, group);
+#endif
+/*RTCA*/
+#ifdef NEW_NETBACK
+		//if(group==0)
+			kthread_bind(netbk->task, 0); //domain0 has only one VCPU
+		//else
+			//kthread_bind(netbk->task, 1);
+#endif
 
 		INIT_LIST_HEAD(&netbk->net_schedule_list);
 

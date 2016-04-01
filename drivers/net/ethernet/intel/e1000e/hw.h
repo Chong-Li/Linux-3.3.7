@@ -114,6 +114,8 @@ enum e1e_registers {
  */
 #define E1000_RDBAL_REG(_n)   (E1000_RDBAL + (_n << 8))
 	E1000_KABGTXD  = 0x03004, /* AFE Band Gap Transmit Ref Data */
+
+	
 	E1000_TDBAL    = 0x03800, /* Tx Descriptor Base Address Low - RW */
 	E1000_TDBAH    = 0x03804, /* Tx Descriptor Base Address High - RW */
 	E1000_TDLEN    = 0x03808, /* Tx Descriptor Length - RW */

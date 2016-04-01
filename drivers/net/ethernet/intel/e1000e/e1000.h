@@ -207,6 +207,11 @@ struct e1000_ps_page {
 	u64 dma; /* must be u64 - written to hw */
 };
 
+/*struct xmit_struct {
+	struct list_head list;
+	struct e1000_buffer *buffer;
+};*/
+
 /*
  * wrappers around a pointer to a socket buffer,
  * so a DMA handle can be stored along with the buffer
@@ -214,6 +219,10 @@ struct e1000_ps_page {
 struct e1000_buffer {
 	dma_addr_t dma;
 	struct sk_buff *skb;
+	
+	/*RTCA*/
+	int vif_index;
+	//struct list_head *list;
 	union {
 		/* Tx */
 		struct {
@@ -269,6 +278,11 @@ struct e1000_phy_regs {
 	u16 estatus;		/* extended status register       */
 };
 
+struct xmit_map{
+	struct e1000_buffer *buffer_info;
+	struct list_head list;
+};
+
 /* board specific private data structure */
 struct e1000_adapter {
 	struct timer_list watchdog_timer;
@@ -302,6 +316,8 @@ struct e1000_adapter {
 	 */
 	struct e1000_ring *tx_ring /* One per active queue */
 						____cacheline_aligned_in_smp;
+	/*RTCA*/
+	spinlock_t vif_send;
 
 	struct napi_struct napi;
 

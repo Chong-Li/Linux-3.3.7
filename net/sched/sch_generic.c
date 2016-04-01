@@ -121,8 +121,14 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 	spin_unlock(root_lock);
 
 	HARD_TX_LOCK(dev, txq, smp_processor_id());
-	if (!netif_xmit_frozen_or_stopped(txq))
+	if (!netif_xmit_frozen_or_stopped(txq)){
+		//printk("Begin to dev_xmit\n");
+		/*if(!memcmp(&(skb->cb[40]),"vif0",4) ){
+			printk("skb1 hard-xmit, in_tx_action=%d\n", in_tx_action);
+		}*/
 		ret = dev_hard_start_xmit(skb, dev, txq);
+
+	}
 
 	HARD_TX_UNLOCK(dev, txq);
 
@@ -140,6 +146,9 @@ int sch_direct_xmit(struct sk_buff *skb, struct Qdisc *q,
 			pr_warning("BUG %s code %d qlen %d\n",
 				   dev->name, ret, q->q.qlen);
 
+		/*if(!memcmp(&(skb->cb[40]),"vif0",4) ){
+			printk("skb1 requeue, in_tx_action=%d\n", in_tx_action);
+		}*/
 		ret = dev_requeue_skb(skb, q);
 	}
 
@@ -189,8 +198,10 @@ static inline int qdisc_restart(struct Qdisc *q)
 
 void __qdisc_run(struct Qdisc *q)
 {
+	//printk("%s\n",__func__);
 	int quota = weight_p;
-
+	//if((q->dev_queue->dev)->domid==1)
+		//printk("qdisc_run\n");
 	while (qdisc_restart(q)) {
 		/*
 		 * Ordered by possible occurrence: Postpone processing if
@@ -250,7 +261,7 @@ static void dev_watchdog(unsigned long arg)
 					break;
 				}
 			}
-
+			//some_queue_timedout=0;
 			if (some_queue_timedout) {
 				WARN_ONCE(1, KERN_INFO "NETDEV WATCHDOG: %s (%s): transmit queue %u timed out\n",
 				       dev->name, netdev_drivername(dev), i);

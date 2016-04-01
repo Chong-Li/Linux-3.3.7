@@ -45,15 +45,20 @@
 #include <xen/grant_table.h>
 #include <xen/xenbus.h>
 
+extern int in_echo;
+
 struct xen_netbk;
 
 struct xenvif {
 	/* Unique identifier for this interface. */
 	domid_t          domid;
+	int priority;
 	unsigned int     handle;
 
 	/* Reference to netback processing backend. */
 	struct xen_netbk *netbk;
+
+	struct sk_buff_head rx_queue_backup;
 
 	u8               fe_dev_addr[6];
 
@@ -99,6 +104,9 @@ struct xenvif {
 
 	wait_queue_head_t waiting_to_free;
 };
+int xenvif_rx_schedulable(struct xenvif *vif);
+extern void kick_rx_backup(struct xenvif *vif);
+
 
 static inline struct xenbus_device *xenvif_to_xenbus_device(struct xenvif *vif)
 {
@@ -111,6 +119,7 @@ static inline struct xenbus_device *xenvif_to_xenbus_device(struct xenvif *vif)
 struct xenvif *xenvif_alloc(struct device *parent,
 			    domid_t domid,
 			    unsigned int handle);
+static inline int tx_work_todo(struct xen_netbk *netbk);
 
 int xenvif_connect(struct xenvif *vif, unsigned long tx_ring_ref,
 		   unsigned long rx_ring_ref, unsigned int evtchn);

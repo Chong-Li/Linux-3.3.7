@@ -36,8 +36,18 @@
 
 #include <xen/events.h>
 #include <asm/xen/hypercall.h>
+#include <linux/if_ether.h>
+#include <linux/icmp.h>
+#include <linux/ip.h>
+#include <linux/sched.h>
+#include <linux/kernel.h>
+
+int in_echo;
 
 #define XENVIF_QUEUE_LENGTH 32
+
+#define NEW_INTERFACE
+//#define NEWNEW
 
 void xenvif_get(struct xenvif *vif)
 {
@@ -55,8 +65,9 @@ int xenvif_schedulable(struct xenvif *vif)
 	return netif_running(vif->dev) && netif_carrier_ok(vif->dev);
 }
 
-static int xenvif_rx_schedulable(struct xenvif *vif)
+ int xenvif_rx_schedulable(struct xenvif *vif)
 {
+
 	return xenvif_schedulable(vif) && !xen_netbk_rx_ring_full(vif);
 }
 
@@ -66,8 +77,25 @@ static irqreturn_t xenvif_interrupt(int irq, void *dev_id)
 
 	if (vif->netbk == NULL)
 		return IRQ_NONE;
+	//if(vif->dev->domid==1){
+		//struct sched_param * param;
+		//sched_getparam(0, param);
+
+		//printk("back\n");
+		//in_echo=1;
+
+	//}
+	if(net_batch_size==39&&vif->domid==1){
+		struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]1", time1.tv_sec*1000000+time1.tv_usec);
+			printk("%s\n", pkt_stamp[pkt_index]);
+			//pkt_index++;
+		//printk("1\n");
+	}
 
 	xen_netbk_schedule_xenvif(vif);
+
 
 	if (xenvif_rx_schedulable(vif))
 		netif_wake_queue(vif->dev);
@@ -77,29 +105,67 @@ static irqreturn_t xenvif_interrupt(int irq, void *dev_id)
 
 static int xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	//if(dev->domid==1)
+		//printk("xenvif_start_xmit\n");
 	struct xenvif *vif = netdev_priv(dev);
+	if(net_batch_size==39&&vif->domid==1){
+		struct timeval time1;
+			do_gettimeofday(&time1);
+			sprintf(pkt_stamp[pkt_index],"[%ld]rxin", time1.tv_sec*1000000+time1.tv_usec);
+			printk("%s\n", pkt_stamp[pkt_index]);
+			//pkt_index++;
+		//printk("rxin\n");
+	}
 
 	BUG_ON(skb->dev != dev);
 
+	//printk("\nlen=%d, data_len=%d\n", skb->len, skb->data_len);
+	//int i;
+	//for (i = (int)skb_shinfo(skb)->nr_frags - 1; i >= 0; i--)
+		//printk(" frag[%d]=%d , ", i, skb_frag_size(&skb_shinfo(skb)->frags[i]));
 	if (vif->netbk == NULL)
 		goto drop;
+	
+/*#ifdef NEW_INTERFACE
+	if ((vif->rx_queue_backup).qlen<1000&&(vif->rx_queue_backup).qlen>0){
+		//printk("add to backup\n");
+		 skb_queue_tail(&(vif->rx_queue_backup), skb);
+		 //kick_rx_backup(vif);
+		return NETDEV_TX_OK;
+	}
+	if(vif->rx_queue_backup.qlen>=1000)
+		goto drop;
+#endif
+*/
 
 	/* Drop the packet if the target domain has no receive buffers. */
-	if (!xenvif_rx_schedulable(vif))
+	if (!xenvif_rx_schedulable(vif)){
+/*#ifdef NEW_INTERFACE
+		skb_queue_tail(&(vif->rx_queue_backup), skb);
+		 //kick_rx_backup(vif);
+		return NETDEV_TX_OK;
+#endif
+*/
+
 		goto drop;
+	}
 
 	/* Reserve ring slots for the worst-case number of fragments. */
 	vif->rx_req_cons_peek += xen_netbk_count_skb_slots(vif, skb);
 	xenvif_get(vif);
 
-	if (vif->can_queue && xen_netbk_must_stop_queue(vif))
+	if (vif->can_queue && xen_netbk_must_stop_queue(vif)){
+		//printk("stop netif_queue\n");
 		netif_stop_queue(dev);
+
+	}
 
 	xen_netbk_queue_tx_skb(vif, skb);
 
 	return NETDEV_TX_OK;
 
  drop:
+ 	//printk("drop\n");
 	vif->dev->stats.tx_dropped++;
 	dev_kfree_skb(skb);
 	return NETDEV_TX_OK;
@@ -107,11 +173,15 @@ static int xenvif_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 void xenvif_receive_skb(struct xenvif *vif, struct sk_buff *skb)
 {
+
 	netif_rx_ni(skb);
 }
 
 void xenvif_notify_tx_completion(struct xenvif *vif)
 {
+#ifdef NEW_INTERFACE
+	kick_rx_backup(vif);
+#endif 
 	if (netif_queue_stopped(vif->dev) && xenvif_rx_schedulable(vif))
 		netif_wake_queue(vif->dev);
 }
@@ -299,6 +369,29 @@ struct xenvif *xenvif_alloc(struct device *parent, domid_t domid,
 		free_netdev(dev);
 		return ERR_PTR(err);
 	}
+
+/*RTCA*/
+#ifdef NEW_INTERFACE
+
+		dev->domid=vif->domid;
+		if(dev->domid>6)
+			dev->priority=5;
+		else
+			dev->priority=(dev->domid-1);
+		if(dev->domid>6)
+			goto next;
+
+		unsigned long flags;
+		struct softnet_data *sd;
+		sd=&__get_cpu_var(softnet_data);
+		local_irq_save(flags);
+		sd->dev_queue[dev->domid-1]=dev;
+		local_irq_restore(flags);
+		skb_queue_head_init(&vif->rx_queue_backup);
+next:
+		printk("interface.c: %s, dom: %d, priority: %d\n", __func__, dev->domid, dev->priority);
+
+#endif
 
 	netdev_dbg(dev, "Successfully created xenvif\n");
 	return vif;
